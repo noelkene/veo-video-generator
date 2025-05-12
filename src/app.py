@@ -15,13 +15,18 @@ GCS_BUCKET_PREFIX = "generated-videos"
 PROJECT_ID = "platinum-banner-303105"  # Your GCP project ID
 LOCATION = "us-central1"  # Your GCP location
 
-# Initialize Google Cloud clients
-storage_client = storage.Client(project=PROJECT_ID)
-genai_client = genai.Client(
-    project=PROJECT_ID,
-    location=LOCATION,
-    vertexai=True
-)
+# Initialize Google Cloud clients using default credentials
+try:
+    storage_client = storage.Client(project=PROJECT_ID)
+    genai_client = genai.Client(
+        project=PROJECT_ID,
+        location=LOCATION,
+        vertexai=True
+    )
+except Exception as e:
+    st.error(f"Error initializing Google Cloud clients: {str(e)}")
+    st.error("Please ensure your Cloud Run service has the correct permissions.")
+    st.stop()
 
 def initialize_bucket():
     """Initialize the GCS bucket if it doesn't exist."""
@@ -51,59 +56,67 @@ def upload_image_to_gcs(image_bytes, bucket):
         st.error(f"Error uploading image: {str(e)}")
         return None
 
-def generate_videos_from_image(image_gcs_uri, bucket):
+def generate_videos_from_image(image_gcs_uri, bucket, num_videos, duration_seconds):
     """Generate videos from an image using Veo 2."""
-    try:
-        # Generate a unique output prefix
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_prefix = f"{GCS_BUCKET_PREFIX}/{timestamp}_{uuid.uuid4()}"
-        output_gcs_uri = f"gs://{BUCKET_NAME}/{output_prefix}"
-        
-        # Configure video generation
-        operation = genai_client.models.generate_videos(
-            model="veo-2.0-generate-001",
-            image=Image(
-                gcs_uri=image_gcs_uri,
-                mime_type="image/png",
-            ),
-            config=GenerateVideosConfig(
-                aspect_ratio="16:9",
-                output_gcs_uri=output_gcs_uri,
-            ),
-        )
-        
-        return handle_video_generation(operation, bucket)
+    uris = []
+    for _ in range(num_videos):
+        try:
+            # Generate a unique output prefix
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_prefix = f"{GCS_BUCKET_PREFIX}/{timestamp}_{uuid.uuid4()}"
+            output_gcs_uri = f"gs://{BUCKET_NAME}/{output_prefix}"
             
-    except Exception as e:
-        st.error(f"Error generating videos: {str(e)}")
-        return None
+            # Configure video generation
+            operation = genai_client.models.generate_videos(
+                model="veo-2.0-generate-001",
+                image=Image(
+                    gcs_uri=image_gcs_uri,
+                    mime_type="image/png",
+                ),
+                config=GenerateVideosConfig(
+                    aspect_ratio="16:9",
+                    output_gcs_uri=output_gcs_uri,
+                    duration_seconds=duration_seconds,
+                ),
+            )
+            
+            result_uris = handle_video_generation(operation, bucket)
+            if result_uris:
+                uris.extend(result_uris)
+        except Exception as e:
+            st.error(f"Error generating videos: {str(e)}")
+    return uris if uris else None
 
-def generate_videos_from_text(prompt, bucket):
+def generate_videos_from_text(prompt, bucket, num_videos, duration_seconds):
     """Generate videos from text using Veo 2."""
-    try:
-        # Generate a unique output prefix
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_prefix = f"{GCS_BUCKET_PREFIX}/{timestamp}_{uuid.uuid4()}"
-        output_gcs_uri = f"gs://{BUCKET_NAME}/{output_prefix}"
-        
-        # Configure video generation
-        operation = genai_client.models.generate_videos(
-            model="veo-2.0-generate-001",
-            prompt=prompt,
-            config=GenerateVideosConfig(
-                aspect_ratio="16:9",
-                output_gcs_uri=output_gcs_uri,
-            ),
-        )
-        
-        return handle_video_generation(operation, bucket)
+    uris = []
+    for _ in range(num_videos):
+        try:
+            # Generate a unique output prefix
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_prefix = f"{GCS_BUCKET_PREFIX}/{timestamp}_{uuid.uuid4()}"
+            output_gcs_uri = f"gs://{BUCKET_NAME}/{output_prefix}"
             
-    except Exception as e:
-        st.error(f"Error generating videos: {str(e)}")
-        return None
+            # Configure video generation
+            operation = genai_client.models.generate_videos(
+                model="veo-2.0-generate-001",
+                prompt=prompt,
+                config=GenerateVideosConfig(
+                    aspect_ratio="16:9",
+                    output_gcs_uri=output_gcs_uri,
+                    duration_seconds=duration_seconds,
+                ),
+            )
+            
+            result_uris = handle_video_generation(operation, bucket)
+            if result_uris:
+                uris.extend(result_uris)
+        except Exception as e:
+            st.error(f"Error generating videos: {str(e)}")
+    return uris if uris else None
 
 def handle_video_generation(operation, bucket):
-    """Handle the video generation process and return the video URI."""
+    """Handle the video generation process and return the video URIs."""
     try:
         # Wait for operation to complete
         with st.spinner("Generating videos... This may take a few minutes."):
@@ -111,9 +124,8 @@ def handle_video_generation(operation, bucket):
                 time.sleep(15)
                 operation = genai_client.operations.get(operation)
                 st.write("Still processing...")
-        
         if operation.response:
-            return operation.result.generated_videos[0].video.uri
+            return [v.video.uri for v in operation.result.generated_videos]
         else:
             st.error("Video generation failed")
             return None
@@ -122,18 +134,20 @@ def handle_video_generation(operation, bucket):
         st.error(f"Error during video generation: {str(e)}")
         return None
 
-def create_download_link(video_uri, bucket):
-    """Create a signed download link for the video."""
+def create_download_links(video_uris, bucket):
+    """Create signed download links for the videos."""
     try:
-        video_blob = bucket.blob(video_uri.replace(f"gs://{BUCKET_NAME}/", ""))
-        video_url = video_blob.generate_signed_url(
-            version="v4",
-            expiration=3600,  # 1 hour
-            method="GET"
-        )
-        st.markdown(f"[Download Video]({video_url})")
+        for idx, video_uri in enumerate(video_uris):
+            video_blob = bucket.blob(video_uri.replace(f"gs://{BUCKET_NAME}/", ""))
+            url = video_blob.generate_signed_url(
+                version="v4",
+                expiration=3600,
+                method="GET"
+            )
+            st.markdown(f"**Video {idx+1}:** [Download Video]({url})")
     except Exception as e:
-        st.error(f"Error creating download link: {str(e)}")
+        st.error(f"Error creating download links: {str(e)}")
+        st.error("Please ensure your Cloud Run service account has the necessary permissions.")
 
 def main():
     st.title("🎥 Veo 2 Video Generator")
@@ -144,6 +158,11 @@ def main():
     if not bucket:
         st.error("Failed to initialize storage bucket")
         return
+    
+    # User options
+    st.sidebar.header("Video Generation Options")
+    num_videos = st.sidebar.selectbox("Number of videos to generate", [1, 2, 3, 4], index=0)
+    duration_seconds = st.sidebar.selectbox("Video duration (seconds)", [5, 6, 7, 8], index=0)
     
     # Create tabs for different input methods
     tab1, tab2 = st.tabs(["Generate from Image", "Generate from Text"])
@@ -168,11 +187,12 @@ def main():
                     return
                 
                 # Generate videos
-                video_uri = generate_videos_from_image(image_gcs_uri, bucket)
-                if video_uri:
+                video_uris = generate_videos_from_image(image_gcs_uri, bucket, num_videos, duration_seconds)
+                if video_uris:
                     st.success("Video generation completed!")
-                    st.write(f"Video URI: {video_uri}")
-                    create_download_link(video_uri, bucket)
+                    for uri in video_uris:
+                        st.write(f"Video URI: {uri}")
+                    create_download_links(video_uris, bucket)
     
     with tab2:
         st.header("Generate from Text")
@@ -182,11 +202,12 @@ def main():
         
         if prompt and st.button("Generate Videos from Text"):
             # Generate videos
-            video_uri = generate_videos_from_text(prompt, bucket)
-            if video_uri:
+            video_uris = generate_videos_from_text(prompt, bucket, num_videos, duration_seconds)
+            if video_uris:
                 st.success("Video generation completed!")
-                st.write(f"Video URI: {video_uri}")
-                create_download_link(video_uri, bucket)
+                for uri in video_uris:
+                    st.write(f"Video URI: {uri}")
+                create_download_links(video_uris, bucket)
 
 if __name__ == "__main__":
     main() 

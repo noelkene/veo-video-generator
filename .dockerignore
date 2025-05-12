@@ -1,3 +1,7 @@
+# Git
+.git
+.gitignore
+
 # Python
 __pycache__/
 *.py[cod]
@@ -34,5 +38,5 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Google Cloud
+# Service account key (we'll handle this separately)
 service-account.json 
